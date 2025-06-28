@@ -226,7 +226,7 @@ ipinfo_resolve_geo_cb(void *clientData)
    }
 
    ipStr = netasync_addr2str(&entry->addr);
-   snprintf(url, sizeof url, "https://freegeoip.net/json/%s", ipStr);
+   snprintf(url, sizeof url, "https://ipinfo.io/%s/json/", ipStr);
    buf = buff_alloc();
 
    h = curl_easy_init();
@@ -235,7 +235,7 @@ ipinfo_resolve_geo_cb(void *clientData)
    curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, ipinfo_curl_write_cb);
    curl_easy_setopt(h, CURLOPT_WRITEDATA, buf);
    /*
-    * We're using https to connect to freegeoip.net, but since the CA
+    * We're using https to connect to ipinfo.io, but since the CA
     * certification bundle may not be properly set-up on the host, we skip the
     * verification phase.  It's not quite as secure as it could potentially be,
     * but the security improvement over a straight http connection channel is
@@ -272,14 +272,13 @@ ipinfo_resolve_geo_cb(void *clientData)
       goto exit;
    }
 
-   ipinfo_json_get(root, "country_code", &entry->country_code);
-   ipinfo_json_get(root, "country_name", &entry->country_name);
-   ipinfo_json_get(root, "region_name",  &entry->region_name);
-   ipinfo_json_get(root, "region_code",  &entry->region_code);
+   ipinfo_json_get(root, "country", &entry->country_code);
+   ipinfo_json_get(root, "region",  &entry->region_name);
+   ipinfo_json_get(root, "region",  &entry->region_code);
    ipinfo_json_get(root, "city",         &entry->city);
    cJSON_Delete(root);
-   Log(LGPFX" %s: %s, %s, %s, %s, %s\n",
-       ipStr, entry->country_code, entry->country_name,
+   Log(LGPFX" %s: %s, %s, %s, %s\n",
+       ipStr, entry->country_code,
        entry->region_name, entry->city, entry->region_code);
 exit:
    buff_free(buf);
