@@ -28,7 +28,6 @@ struct tx_broadcast {
 static const char *peer_seeds_main[] = {
    "seed.bitcoin.sipa.be",
    "dnsseed.bluematt.me",
-   "dnsseed.bitcoin.dashjr.org",
    "seed.bitcoinstats.com",
    "bitseed.xf2.org",
 };
