@@ -1,4 +1,4 @@
-[![CI](https://github.com/mx4/bitc/actions/workflows/ci.yml/badge.svg)](https://github.com/mx4/bitc/actions/workflows/ci.yml)
+[![CI](https://github.com/Shinoa-Fores/bitc/actions/workflows/ci.yml/badge.svg)](https://github.com/Shinoa-Fores/bitc/actions/workflows/ci.yml)
 
 ### BITC
 
@@ -20,7 +20,7 @@ bitc is a *thin* SPV bitcoin client.
 
 #### Screenshots
 
-![dashboard](https://i.imgur.com/IJJU14s.png)
+![dashboard](img/dashboard.png)
 
 ---
 
@@ -39,14 +39,20 @@ bitc is a *thin* SPV bitcoin client.
 
 #### Install
 
-##### Ubuntu 13.10, Saucy Salamander
-
 You first need to install the libraries this app uses:
+
+##### Debian, Ubuntu, and derivatives:
 ```
-   # sudo apt-get install git make clang libssl-dev
-   # sudo apt-get install libcurl4-openssl-dev libncurses5-dev
-   # sudo apt-get install libleveldb-dev libsnappy-dev
-   # sudo apt-get install libstdc++-4.8-dev
+   # sudo apt-get install -y libleveldb-dev libcurl4-openssl-dev libssl-dev libncurses-dev libleveldb-dev libsnappy-dev
+```
+
+##### Gentoo:
+```
+   # emerge -av net-misc/curl \
+                dev-libs/openssl \
+                dev-libs/leveldb \ 
+                app-arch/snappy \
+                sys-libs/ncurses
 ```
 
 then clone the git repository:
@@ -118,8 +124,7 @@ Note that bitc encrypts each private key separately.
 #### Importing existing keys
 
 You need to modify your `~/.bitc/wallet.cfg` so that it contains the private
-key as exported by `bitcoin-qt` with the command `dumpprivkey`. More on that
-later.
+key as exported by `bitcoin-qt` with the command `dumpprivkey`.
 
 ---
 
@@ -160,7 +165,7 @@ file](TODO.md)), and some of these may explain the behavior you're seeing.  If b
 crashes, please collect the log file along with the core dump and open a ticket
 on github:  
 
-	https://github.com/bit-c/bitc/issues
+	https://github.com/Shinoa-Fores/bitc/issues
 
 ---
 
@@ -169,5 +174,5 @@ on github:
 Feel free to reach out to me if you have any feedback or if you're planning to
 use this code in interesting ways.
 
-   mailto:austruym@gmail.com
-   PGP: 1C774FA3925A3076752B2741054E32DFBEE883DB
+   mailto:btcinfo@sdf.org
+   PGP: 260FA57BCE677A5C04BF60BA4A75883CC1B1D34C
