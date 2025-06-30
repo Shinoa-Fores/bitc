@@ -56,7 +56,7 @@ endif
 ### the rest
 ###
 
-LIBS  = -lpthread -lssl -lcrypto -lm -lncurses -lpanel -lform -lcurl
+LIBS  = -lpthread -lssl -lcrypto -lm -lncurses -ltinfo -lpanel -lform -lcurl
 LIBS += -lleveldb -lsnappy -lstdc++
 
 ifeq ($(OS), OpenBSD)
