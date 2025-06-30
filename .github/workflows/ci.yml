@@ -2,18 +2,26 @@ name: CI
 
 on:
   push:
-    branches: [ "devel" ]
-  pull_request:
-    branches: [ "devel" ]
+    branches:
+      - devel
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: install packages
-      run: sudo apt-get install -y libleveldb-dev libcurl4-openssl-dev libssl-dev libncurses-dev libleveldb-dev libsnappy-dev
-    - name: make
-      run: make
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libcurl4-openssl-dev \
+            libssl-dev \
+            libncurses-dev \
+            libleveldb-dev \
+            libsnappy-dev
+
+      - name: Build project
+        run: make
