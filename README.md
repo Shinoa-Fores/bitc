@@ -57,7 +57,7 @@ You first need to install the libraries this app uses:
 
 then clone the git repository:
 ```
-   # git clone https://github.com/bit-c/bitc.git
+   # git clone https://github.com/Shinoa-Fores/bitc.git
 ```
 
 finally build and launch:
@@ -174,5 +174,5 @@ on github:
 Feel free to reach out to me if you have any feedback or if you're planning to
 use this code in interesting ways.
 
-   mailto:btcinfo@sdf.org
-   PGP: 260FA57BCE677A5C04BF60BA4A75883CC1B1D34C
+mailto:btcinfo@sdf.org
+PGP: 260FA57BCE677A5C04BF60BA4A75883CC1B1D34C
