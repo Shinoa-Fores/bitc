@@ -21,7 +21,9 @@ jobs:
             libssl-dev \
             libncurses-dev \
             libleveldb-dev \
-            libsnappy-dev
+            libsnappy-dev \
+            libsecp256k1-0 \
+            libsecp256k1-dev
 
       - name: Build project
         run: make
