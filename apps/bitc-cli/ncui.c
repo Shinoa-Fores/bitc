@@ -9,6 +9,17 @@
 #include <panel.h>
 #include <form.h>
 #include <sys/ioctl.h>
+#include <openssl/bio.h>
+#include <openssl/evp.h>
+#include <openssl/buffer.h>
+#include <openssl/bn.h>
+#include <openssl/ec.h>
+#include <openssl/ecdsa.h>
+#include <openssl/obj_mac.h>
+#include <secp256k1.h>
+#include <secp256k1_recovery.h>
+#include <openssl/sha.h>
+#include <openssl/ripemd.h>
 
 #include "basic_defs.h"
 #include "util.h"
@@ -21,6 +32,9 @@
 #include "bitc_ui.h"
 #include "bitc-defs.h"
 #include "ip_info.h"
+#include "wallet.h"
+#include "key.h"
+#include "ecdsa_secp256k1.h"
 
 #define LGPFX   "NCUI:"
 
@@ -90,6 +104,30 @@ enum NCUIFormField {
    TX_FIELD_OK                  = 11,
    TX_FIELD_LAST                = 12,
    TX_FIELD_NUM                 = 13,
+};
+
+enum NCUIFormSignField {
+   SIGN_FIELD_ADDR_LABEL = 0,
+   SIGN_FIELD_ADDR = 1,
+   SIGN_FIELD_MSG_LABEL = 2,
+   SIGN_FIELD_MSG = 3,
+   SIGN_FIELD_CANCEL = 4,
+   SIGN_FIELD_OK = 5,
+   SIGN_FIELD_LAST = 6,
+   SIGN_FIELD_NUM = 7,
+};
+
+enum NCUIFormVerifyField {
+    VERIFY_FIELD_ADDR_LABEL = 0,
+    VERIFY_FIELD_ADDR = 1,
+    VERIFY_FIELD_MSG_LABEL = 2,
+    VERIFY_FIELD_MSG = 3,
+    VERIFY_FIELD_SIG_LABEL = 4,
+    VERIFY_FIELD_SIG = 5,
+    VERIFY_FIELD_CANCEL = 6,
+    VERIFY_FIELD_OK = 7,
+    VERIFY_FIELD_LAST = 8,
+    VERIFY_FIELD_NUM = 9,
 };
 
 /*
@@ -182,9 +220,14 @@ static void ncui_panel_switch_to(struct ncpanel *panel);
 static void ncui_blocklist_update(void);
 static void ncui_dashboard_update(void);
 static void ncui_tx_form_create(struct ncui *ncui);
+static void ncui_sign_form_create(struct ncui *ncui);
+static void ncui_sign_form_complete(struct ncui *ncui, bool ok);
+static void ncui_verify_form_create(struct ncui *ncui);
+static void ncui_verify_form_complete(struct ncui *ncui, bool ok);
+static void ncui_show_signed_message_result(struct ncui *ncui, const char *address, const char *message, const char *signature);
 static void ncui_input_kbd_cb(struct ncui *ncui,
                               const char *cmd);
-
+                              
 static const struct {
    enum PanelType    type;
    panel_create_cb  *panelCreate;
@@ -907,8 +950,8 @@ ncui_form_input_cb(struct ncui *ncui)
 
    f = current_field(ncui->form);
 
-   isOK     = f == ncui->field[TX_FIELD_OK];
-   isCancel = f == ncui->field[TX_FIELD_CANCEL];
+   isOK     = (f == ncui->field[TX_FIELD_OK]) || (f == ncui->field[SIGN_FIELD_OK]) || (f == ncui->field[VERIFY_FIELD_OK]);
+   isCancel = (f == ncui->field[TX_FIELD_CANCEL]) || (f == ncui->field[SIGN_FIELD_CANCEL]) || (f == ncui->field[VERIFY_FIELD_CANCEL]);
 
    c = wgetch(ncui->fwin);
 
@@ -920,7 +963,13 @@ ncui_form_input_cb(struct ncui *ncui)
       isCancel = 1;
    case '\r':
       if (isOK || isCancel) {
-         ncui_tx_form_complete(ncui, isOK);
+         if (f == ncui->field[SIGN_FIELD_OK] || f == ncui->field[SIGN_FIELD_CANCEL]) {
+            ncui_sign_form_complete(ncui, isOK);
+         } else if (f == ncui->field[VERIFY_FIELD_OK] || f == ncui->field[VERIFY_FIELD_CANCEL]) {
+            ncui_verify_form_complete(ncui, isOK);
+         } else {
+            ncui_tx_form_complete(ncui, isOK);
+         }
       } else {
          form_driver(ncui->form, REQ_NEXT_FIELD);
          form_driver(ncui->form, REQ_END_LINE);
@@ -963,22 +1012,36 @@ ncui_form_input_cb(struct ncui *ncui)
    }
    if (ncui->form) {
       f = current_field(ncui->form);
-      isOK     = f == ncui->field[TX_FIELD_OK];
-      isCancel = f == ncui->field[TX_FIELD_CANCEL];
+      isOK     = (f == ncui->field[TX_FIELD_OK]) || (f == ncui->field[SIGN_FIELD_OK]) || (f == ncui->field[VERIFY_FIELD_OK]);
+      isCancel = (f == ncui->field[TX_FIELD_CANCEL]) || (f == ncui->field[SIGN_FIELD_CANCEL]) || (f == ncui->field[VERIFY_FIELD_CANCEL]);
       if (isOK || isCancel) {
          if (ncui->curs_on) {
             curs_set(0);
             ncui->curs_on = 0;
          }
-         set_field_fore(ncui->field[TX_FIELD_CANCEL], isCancel ? A_REVERSE : A_NORMAL);
-         set_field_fore(ncui->field[TX_FIELD_OK],     isOK     ? A_REVERSE : A_NORMAL);
+         // Highlight the correct OK/Cancel fields for the active form
+         if (f == ncui->field[SIGN_FIELD_OK] || f == ncui->field[SIGN_FIELD_CANCEL]) {
+            set_field_fore(ncui->field[SIGN_FIELD_CANCEL], isCancel ? A_REVERSE : A_NORMAL);
+            set_field_fore(ncui->field[SIGN_FIELD_OK],     isOK     ? A_REVERSE : A_NORMAL);
+         } else if (f == ncui->field[VERIFY_FIELD_OK] || f == ncui->field[VERIFY_FIELD_CANCEL]) {
+            set_field_fore(ncui->field[VERIFY_FIELD_CANCEL], isCancel ? A_REVERSE : A_NORMAL);
+            set_field_fore(ncui->field[VERIFY_FIELD_OK],     isOK     ? A_REVERSE : A_NORMAL);
+         } else {
+            set_field_fore(ncui->field[TX_FIELD_CANCEL], isCancel ? A_REVERSE : A_NORMAL);
+            set_field_fore(ncui->field[TX_FIELD_OK],     isOK     ? A_REVERSE : A_NORMAL);
+         }
       } else {
          if (ncui->curs_on == 0) {
             curs_set(1);
             ncui->curs_on = 1;
          }
+         // Reset both forms' OK/Cancel highlights
          set_field_fore(ncui->field[TX_FIELD_CANCEL], A_NORMAL);
          set_field_fore(ncui->field[TX_FIELD_OK], A_NORMAL);
+         set_field_fore(ncui->field[SIGN_FIELD_CANCEL], A_NORMAL);
+         set_field_fore(ncui->field[SIGN_FIELD_OK], A_NORMAL);
+         set_field_fore(ncui->field[VERIFY_FIELD_CANCEL], A_NORMAL);
+         set_field_fore(ncui->field[VERIFY_FIELD_OK], A_NORMAL);
       }
    }
 }
@@ -1105,6 +1168,20 @@ here:
          break;
       }
       ncui_tx_form_create(ncui);
+      break;
+   case 19: // CTRL-S
+      if (!bitc_state_ready()) {
+         bitcui_set_status("failed to sign: still sync'ing..");
+         break;
+      }
+      if (btc->wallet_state == WALLET_ENCRYPTED_LOCKED) {
+         bitcui_set_status("failed to sign: wallet is encrypted.");
+         break;
+      }
+      ncui_sign_form_create(ncui);
+      break;
+   case 22: // CTRL-V or Alt+v (if your terminal sends 22 for Alt+v)
+      ncui_verify_form_create(ncui);
       break;
    default:
       bitcui_set_status("char: %d", c);
@@ -2637,5 +2714,508 @@ ncui_exit(void)
    memset(btc->ui, 0, sizeof *btc->ui);
    free(btc->ui);
    btc->ui = NULL;
+}
+
+
+/*
+ *---------------------------------------------------------------------
+ *
+ * ncui_sign_form_create --
+ *
+ *---------------------------------------------------------------------
+ */
+
+static void
+ncui_sign_form_create(struct ncui *ncui)
+{
+   FIELD **field = ncui->field;
+   int rows, cols;
+   field[SIGN_FIELD_ADDR_LABEL] = new_field(1, 8, 0, 2, 0, 0);
+   field[SIGN_FIELD_ADDR]       = new_field(1, 35, 0, 12, 0, 0);
+   field[SIGN_FIELD_MSG_LABEL]  = new_field(1, 8, 2, 2, 0, 0);
+   field[SIGN_FIELD_MSG]        = new_field(3, 35, 2, 12, 0, 0);
+   field[SIGN_FIELD_CANCEL]     = new_field(1, 8, 6, 13, 0, 0);
+   field[SIGN_FIELD_OK]         = new_field(1, 4, 6, 31, 0, 0);
+   field[SIGN_FIELD_LAST]       = NULL;
+   set_field_buffer(field[SIGN_FIELD_ADDR_LABEL], 0, "address:");
+   set_field_buffer(field[SIGN_FIELD_MSG_LABEL], 0, "message:");
+   set_field_buffer(field[SIGN_FIELD_CANCEL], 0, "Cancel");
+   set_field_buffer(field[SIGN_FIELD_OK], 0, "OK");
+   set_field_back(field[SIGN_FIELD_ADDR], A_UNDERLINE);
+   set_field_back(field[SIGN_FIELD_MSG],  A_UNDERLINE);
+   set_field_back(field[SIGN_FIELD_CANCEL], A_REVERSE);
+   set_field_back(field[SIGN_FIELD_OK],     A_REVERSE);
+   field_opts_on(field[SIGN_FIELD_ADDR], O_PUBLIC);
+   field_opts_on(field[SIGN_FIELD_MSG],  O_PUBLIC);
+   field_opts_on(field[SIGN_FIELD_ADDR], O_EDIT);
+   field_opts_on(field[SIGN_FIELD_MSG],  O_EDIT);
+   field_opts_off(field[SIGN_FIELD_ADDR_LABEL], O_ACTIVE);
+   field_opts_off(field[SIGN_FIELD_MSG_LABEL],  O_ACTIVE);
+   field_opts_off(field[SIGN_FIELD_ADDR_LABEL], O_EDIT);
+   field_opts_off(field[SIGN_FIELD_MSG_LABEL],  O_EDIT);
+   field_opts_off(field[SIGN_FIELD_CANCEL],     O_EDIT);
+   field_opts_off(field[SIGN_FIELD_OK],         O_EDIT);
+   set_field_back(field[SIGN_FIELD_ADDR_LABEL], PAIR_CYAN);
+   set_field_back(field[SIGN_FIELD_MSG_LABEL],  PAIR_CYAN);
+   set_field_back(field[SIGN_FIELD_CANCEL],     PAIR_CYAN);
+   set_field_back(field[SIGN_FIELD_OK],         PAIR_CYAN);
+   ncui->form = new_form(ncui->field);
+   scale_form(ncui->form, &rows, &cols);
+   ncui->fwin_width  = rows + 6;
+   ncui->fwin_height = cols + 4;
+   ncui->fwin = newpad(ncui->fwin_width, ncui->fwin_height);
+   ncui->fpanel = new_panel(ncui->fwin);
+   top_panel(ncui->fpanel);
+   update_panels();
+   keypad(ncui->fwin, TRUE);
+   set_form_win(ncui->form, ncui->fwin);
+   set_form_sub(ncui->form, subpad(ncui->fwin, rows, cols, 4, 1));
+   box(ncui->fwin, 0, 0);
+   curs_set(1);
+   ncui->curs_on = 1;
+   post_form(ncui->form);
+   wattron(ncui->fwin, PAIR_CYAN);
+   mvwprintw(ncui->fwin, 2, 20, "SIGN MESSAGE");
+   wattroff(ncui->fwin, PAIR_CYAN);
+   wnoutrefresh(ncui->fwin);
+   pos_form_cursor(ncui->form);
+}
+
+
+/*
+ *---------------------------------------------------------------------
+ *
+ * bitcoin_sign_message --
+ *
+ *---------------------------------------------------------------------
+ */
+
+static void print_hex(const char *label, const uint8_t *data, size_t len);
+
+static char *
+bitcoin_sign_message(const char *message, struct key *k)
+{
+    const unsigned char prefix[] = {0x18, 'B','i','t','c','o','i','n',' ','S','i','g','n','e','d',' ','M','e','s','s','a','g','e',':','\n'};
+    size_t prefix_len = sizeof(prefix);
+    size_t msg_len = strlen(message);
+    uint8_t varint[5];
+    size_t varint_len = 0;
+    if (msg_len < 0xfd) {
+        varint[0] = (uint8_t)msg_len;
+        varint_len = 1;
+    } else {
+        return NULL;
+    }
+    size_t total_len = prefix_len + varint_len + msg_len;
+    uint8_t *buf = safe_malloc(total_len);
+    memcpy(buf, prefix, prefix_len);
+    memcpy(buf + prefix_len, varint, varint_len);
+    memcpy(buf + prefix_len + varint_len, message, msg_len);
+
+    uint256 hash1, hash2;
+    sha256_calc(buf, total_len, &hash1);
+    sha256_calc(&hash1, 32, &hash2);
+    free(buf);
+
+    // Get 32-byte privkey from struct key
+    uint8_t *privkey = NULL;
+    size_t privkey_len = 0;
+    if (!key_get_privkey(k, &privkey, &privkey_len) || privkey_len < 32) {
+        bitcui_set_status("Failed to get privkey from struct key");
+        if (privkey) free(privkey);
+        return NULL;
+    }
+    uint8_t privkey32[32];
+    memcpy(privkey32, privkey, 32);
+    free(privkey);
+
+    uint8_t sig65[65];
+    int recid;
+    int is_compressed = 1; // Assume compressed for Bitcoin addresses
+    if (!ecdsa_sign_compact_secp256k1(privkey32, (uint8_t*)&hash2, sig65, &recid, is_compressed)) {
+        bitcui_set_status("secp256k1 ECDSA signing failed");
+        return NULL;
+    }
+
+    // Base64 encode the compact signature (header + 64 bytes)
+    BIO *b64 = BIO_new(BIO_f_base64());
+    BIO *mem = BIO_new(BIO_s_mem());
+    b64 = BIO_push(b64, mem);
+    BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
+    BIO_write(b64, sig65, 65);
+    BIO_flush(b64);
+    BUF_MEM *bptr;
+    BIO_get_mem_ptr(b64, &bptr);
+    char *b64sig = safe_malloc(bptr->length + 1);
+    memcpy(b64sig, bptr->data, bptr->length);
+    b64sig[bptr->length] = '\0';
+    BIO_free_all(b64);
+    return b64sig;
+}
+
+
+/*
+ *---------------------------------------------------------------------
+ *
+ * ncui_sign_form_process --
+ *
+ *---------------------------------------------------------------------
+ */
+
+static void
+ncui_sign_form_process(struct ncui *ncui)
+{
+   char addr_buf[128];
+   char msg_buf[256];
+   // Copy and trim address
+   strncpy(addr_buf, field_buffer(ncui->field[SIGN_FIELD_ADDR], 0), sizeof(addr_buf)-1);
+   addr_buf[sizeof(addr_buf)-1] = 0;
+   for (int i = strlen(addr_buf) - 1; i >= 0 && addr_buf[i] == ' '; --i)
+       addr_buf[i] = 0;
+   // Copy and trim message
+   strncpy(msg_buf, field_buffer(ncui->field[SIGN_FIELD_MSG], 0), sizeof(msg_buf)-1);
+   msg_buf[sizeof(msg_buf)-1] = 0;
+   for (int i = strlen(msg_buf) - 1; i >= 0 && msg_buf[i] == ' '; --i)
+       msg_buf[i] = 0;
+
+   // Now destroy the form
+   ncui_tx_form_destroy(ncui);
+
+   if (!b58_pubkey_is_valid(addr_buf)) {
+       bitcui_set_status("address %s is invalid", addr_buf);
+       return;
+   }
+   uint160 pubkey_hash;
+   b58_pubkey_to_uint160(addr_buf, &pubkey_hash);
+   struct key *k = wallet_lookup_pubkey(btc->wallet, &pubkey_hash);
+   if (!k) {
+       bitcui_set_status("address not found in wallet");
+       return;
+   }
+   // Check if wallet is locked
+   if (btc->wallet_state == WALLET_ENCRYPTED_LOCKED) {
+       bitcui_set_status("wallet is encrypted and locked");
+       return;
+   }
+   char *sig = bitcoin_sign_message(msg_buf, k);
+   if (!sig) {
+       bitcui_set_status("signing failed");
+       return;
+   }
+   ncui_show_signed_message_result(ncui, addr_buf, msg_buf, sig);
+   free(sig);
+}
+
+
+/*
+ *---------------------------------------------------------------------
+ *
+ * ncui_sign_form_complete --
+ *
+ *---------------------------------------------------------------------
+ */
+
+static void
+ncui_sign_form_complete(struct ncui *ncui, bool ok)
+{
+   if (ok) {
+       ncui_sign_form_process(ncui);
+   } else {
+       bitcui_set_status("Sign cancelled.");
+       ncui_tx_form_destroy(ncui);
+   }
+   ncui_panel_refresh(ncui->panelTop);
+}
+
+/*
+ *---------------------------------------------------------------------
+ *
+ * ncui_verify_form_create --
+ *
+ *---------------------------------------------------------------------
+ */
+
+static void ncui_verify_form_create(struct ncui *ncui)
+{
+    FIELD **field = ncui->field;
+    int rows, cols;
+    field[VERIFY_FIELD_ADDR_LABEL] = new_field(1, 8, 0, 2, 0, 0);
+    field[VERIFY_FIELD_ADDR]       = new_field(1, 35, 0, 12, 0, 0);
+    field[VERIFY_FIELD_MSG_LABEL]  = new_field(1, 8, 2, 2, 0, 0);
+    field[VERIFY_FIELD_MSG]        = new_field(3, 35, 2, 12, 0, 0);
+    field[VERIFY_FIELD_SIG_LABEL]  = new_field(1, 10, 6, 2, 0, 0);
+    field[VERIFY_FIELD_SIG]        = new_field(3, 44, 6, 12, 0, 0);
+    field[VERIFY_FIELD_CANCEL]     = new_field(1, 8, 10, 13, 0, 0);
+    field[VERIFY_FIELD_OK]         = new_field(1, 4, 10, 31, 0, 0);
+    field[VERIFY_FIELD_LAST]       = NULL;
+    set_field_buffer(field[VERIFY_FIELD_ADDR_LABEL], 0, "address:");
+    set_field_buffer(field[VERIFY_FIELD_MSG_LABEL], 0, "message:");
+    set_field_buffer(field[VERIFY_FIELD_SIG_LABEL], 0, "signature:");
+    set_field_buffer(field[VERIFY_FIELD_CANCEL], 0, "Cancel");
+    set_field_buffer(field[VERIFY_FIELD_OK], 0, "OK");
+    set_field_back(field[VERIFY_FIELD_ADDR], A_UNDERLINE);
+    set_field_back(field[VERIFY_FIELD_MSG],  A_UNDERLINE);
+    set_field_back(field[VERIFY_FIELD_SIG],  A_UNDERLINE);
+    set_field_back(field[VERIFY_FIELD_CANCEL], A_REVERSE);
+    set_field_back(field[VERIFY_FIELD_OK],     A_REVERSE);
+    field_opts_on(field[VERIFY_FIELD_ADDR], O_PUBLIC);
+    field_opts_on(field[VERIFY_FIELD_MSG],  O_PUBLIC);
+    field_opts_on(field[VERIFY_FIELD_SIG],  O_PUBLIC);
+    field_opts_on(field[VERIFY_FIELD_ADDR], O_EDIT);
+    field_opts_on(field[VERIFY_FIELD_MSG],  O_EDIT);
+    field_opts_on(field[VERIFY_FIELD_SIG],  O_EDIT);
+    field_opts_off(field[VERIFY_FIELD_ADDR_LABEL], O_ACTIVE);
+    field_opts_off(field[VERIFY_FIELD_MSG_LABEL],  O_ACTIVE);
+    field_opts_off(field[VERIFY_FIELD_SIG_LABEL],  O_ACTIVE);
+    field_opts_off(field[VERIFY_FIELD_ADDR_LABEL], O_EDIT);
+    field_opts_off(field[VERIFY_FIELD_MSG_LABEL],  O_EDIT);
+    field_opts_off(field[VERIFY_FIELD_SIG_LABEL],  O_EDIT);
+    field_opts_off(field[VERIFY_FIELD_CANCEL],     O_EDIT);
+    field_opts_off(field[VERIFY_FIELD_OK],         O_EDIT);
+    set_field_back(field[VERIFY_FIELD_ADDR_LABEL], PAIR_CYAN);
+    set_field_back(field[VERIFY_FIELD_MSG_LABEL],  PAIR_CYAN);
+    set_field_back(field[VERIFY_FIELD_SIG_LABEL],  PAIR_CYAN);
+    set_field_back(field[VERIFY_FIELD_CANCEL],     PAIR_CYAN);
+    set_field_back(field[VERIFY_FIELD_OK],         PAIR_CYAN);
+    ncui->form = new_form(ncui->field);
+    scale_form(ncui->form, &rows, &cols);
+    ncui->fwin_width  = rows + 6;
+    ncui->fwin_height = cols + 4;
+    ncui->fwin = newpad(ncui->fwin_width, ncui->fwin_height);
+    ncui->fpanel = new_panel(ncui->fwin);
+    top_panel(ncui->fpanel);
+    update_panels();
+    keypad(ncui->fwin, TRUE);
+    set_form_win(ncui->form, ncui->fwin);
+    set_form_sub(ncui->form, subpad(ncui->fwin, rows, cols, 4, 1));
+    box(ncui->fwin, 0, 0);
+    curs_set(1);
+    ncui->curs_on = 1;
+    post_form(ncui->form);
+    wattron(ncui->fwin, PAIR_CYAN);
+    mvwprintw(ncui->fwin, 2, 20, "VERIFY MESSAGE");
+    wattroff(ncui->fwin, PAIR_CYAN);
+    wnoutrefresh(ncui->fwin);
+    pos_form_cursor(ncui->form);
+}
+
+
+/*
+ *---------------------------------------------------------------------
+ *
+ * ncui_verify_form_process --
+ *
+ *---------------------------------------------------------------------
+ */
+
+static void ncui_verify_form_process(struct ncui *ncui)
+{
+    char addr_buf[128], msg_buf[256], sig_buf[256];
+    // Copy and trim address
+    strncpy(addr_buf, field_buffer(ncui->field[VERIFY_FIELD_ADDR], 0), sizeof(addr_buf)-1);
+    addr_buf[sizeof(addr_buf)-1] = 0;
+    for (int i = strlen(addr_buf) - 1; i >= 0 && addr_buf[i] == ' '; --i)
+        addr_buf[i] = 0;
+    // Copy and trim message
+    strncpy(msg_buf, field_buffer(ncui->field[VERIFY_FIELD_MSG], 0), sizeof(msg_buf)-1);
+    msg_buf[sizeof(msg_buf)-1] = 0;
+    for (int i = strlen(msg_buf) - 1; i >= 0 && msg_buf[i] == ' '; --i)
+        msg_buf[i] = 0;
+    // Copy and trim signature
+    strncpy(sig_buf, field_buffer(ncui->field[VERIFY_FIELD_SIG], 0), sizeof(sig_buf)-1);
+    sig_buf[sizeof(sig_buf)-1] = 0;
+    for (int i = strlen(sig_buf) - 1; i >= 0 && sig_buf[i] == ' '; --i)
+        sig_buf[i] = 0;
+
+    if (!b58_pubkey_is_valid(addr_buf)) {
+        bitcui_set_status("address %s is invalid", addr_buf);
+        return;
+    }
+
+    // Base64 decode the signature
+    BIO *b64 = BIO_new(BIO_f_base64());
+    BIO *bmem = BIO_new_mem_buf(sig_buf, -1);
+    b64 = BIO_push(b64, bmem);
+    BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
+    uint8_t sig65[65];
+    int siglen = BIO_read(b64, sig65, 65);
+    BIO_free_all(b64);
+    if (siglen != 65) {
+        bitcui_set_status("Signature must be 65 bytes after base64 decode");
+        return;
+    }
+
+    // Parse header byte
+    uint8_t header = sig65[0];
+    if (header < 27 || header > 34) {
+        bitcui_set_status("Invalid signature header byte");
+        return;
+    }
+    int recid = (header - 27) & 3;
+    int is_compressed = ((header - 27) & 4) != 0;
+
+    // Reconstruct message hash
+    const unsigned char prefix[] = {0x18, 'B','i','t','c','o','i','n',' ','S','i','g','n','e','d',' ','M','e','s','s','a','g','e',':','\n'};
+    size_t prefix_len = sizeof(prefix);
+    size_t msg_len = strlen(msg_buf);
+    uint8_t varint[5];
+    size_t varint_len = 0;
+    if (msg_len < 0xfd) {
+        varint[0] = (uint8_t)msg_len;
+        varint_len = 1;
+    } else {
+        bitcui_set_status("Message too long");
+        return;
+    }
+    size_t total_len = prefix_len + varint_len + msg_len;
+    uint8_t *buf = safe_malloc(total_len);
+    memcpy(buf, prefix, prefix_len);
+    memcpy(buf + prefix_len, varint, varint_len);
+    memcpy(buf + prefix_len + varint_len, msg_buf, msg_len);
+    uint256 hash1, hash2;
+    sha256_calc(buf, total_len, &hash1);
+    sha256_calc(&hash1, 32, &hash2);
+    free(buf);
+
+    // Recover public key
+    secp256k1_context *ctx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY);
+    secp256k1_pubkey pubkey;
+    secp256k1_ecdsa_recoverable_signature rsig;
+    if (!secp256k1_ecdsa_recoverable_signature_parse_compact(ctx, &rsig, sig65+1, recid)) {
+        secp256k1_context_destroy(ctx);
+        bitcui_set_status("Failed to parse recoverable signature");
+        return;
+    }
+    if (!secp256k1_ecdsa_recover(ctx, &pubkey, &rsig, (const unsigned char*)&hash2)) {
+        secp256k1_context_destroy(ctx);
+        bitcui_set_status("Failed to recover public key");
+        return;
+    }
+    // Serialize recovered pubkey
+    uint8_t pubkey_ser[65];
+    size_t pubkey_ser_len = is_compressed ? 33 : 65;
+    if (!secp256k1_ec_pubkey_serialize(ctx, pubkey_ser, &pubkey_ser_len, &pubkey, is_compressed ? SECP256K1_EC_COMPRESSED : SECP256K1_EC_UNCOMPRESSED)) {
+        secp256k1_context_destroy(ctx);
+        bitcui_set_status("Failed to serialize recovered pubkey");
+        return;
+    }
+    secp256k1_context_destroy(ctx);
+
+    // Hash pubkey: SHA256 then RIPEMD160
+    uint8_t sha256[32], hash160[20];
+    SHA256(pubkey_ser, pubkey_ser_len, sha256);
+    RIPEMD160(sha256, 32, hash160);
+
+    // Convert hash160 to base58 address using b58_pubkey_from_uint160
+    uint160 hash160_struct;
+    memcpy(&hash160_struct, hash160, 20);
+    char *rec_addr = b58_pubkey_from_uint160(&hash160_struct);
+    if (!rec_addr) {
+        bitcui_set_status("Failed to encode address");
+        return;
+    }
+
+    // Compare addresses
+    if (strcmp(addr_buf, rec_addr) == 0) {
+        bitcui_set_status("Signature verified: address matches!");
+    } else {
+        bitcui_set_status("Signature does NOT match address.");
+    }
+    free(rec_addr);
+}
+
+
+/*
+ *---------------------------------------------------------------------
+ *
+ * ncui_verify_form_complete --
+ *
+ *---------------------------------------------------------------------
+ */
+
+static void ncui_verify_form_complete(struct ncui *ncui, bool ok)
+{
+    if (ok) {
+        ncui_verify_form_process(ncui);
+    } else {
+        bitcui_set_status("Verify cancelled.");
+    }
+    ncui_tx_form_destroy(ncui);
+    ncui_panel_refresh(ncui->panelTop);
+}
+
+static void ncui_show_signed_message_result(struct ncui *ncui, const char *address, const char *message, const char *signature) {
+
+    char *fullmsg = safe_malloc(2048);
+    snprintf(fullmsg, 2048,
+        "-----BEGIN BITCOIN SIGNED MESSAGE-----\n"
+        "Comment: bitc v0.1.0\n"
+        "%s\n"
+        "%s\n"
+        "-----BEGIN BITCOIN SIGNATURE-----\n"
+        "%s\n"
+        "-----END BITCOIN SIGNATURE-----",
+        address, message, signature);
+
+    int max_line = 0, lines = 0, cur = 0;
+    for (const char *p = fullmsg; ; ++p) {
+        if (*p == '\n' || *p == '\0') {
+            if (cur > max_line) max_line = cur;
+            lines++;
+            cur = 0;
+            if (*p == '\0') break;
+        } else {
+            cur++;
+        }
+    }
+    int rows = lines + 6; 
+    int cols = max_line + 6; 
+    if (rows < 10) rows = 10;
+    if (cols < 40) cols = 40;
+    if (rows > LINES-2) rows = LINES-2;
+    if (cols > COLS-2) cols = COLS-2;
+
+    int starty = (LINES - rows) / 2;
+    int startx = (COLS - cols) / 2;
+
+    WINDOW *win = newwin(rows, cols, starty, startx);
+    PANEL *panel = new_panel(win);
+    box(win, 0, 0);
+
+    
+    wattron(win, PAIR_CYAN);
+    int title_x = (cols - 24) / 2;
+    if (title_x < 1) title_x = 1;
+    mvwprintw(win, 0, title_x, "BITCOIN SIGNED MESSAGE");
+    wattroff(win, PAIR_CYAN);
+
+
+    int y = 2;
+    char *saveptr = NULL;
+    char *line = strtok_r(fullmsg, "\n", &saveptr);
+    while (line && y < rows-3) {
+        mvwprintw(win, y++, 2, "%s", line);
+        line = strtok_r(NULL, "\n", &saveptr);
+    }
+
+
+    wattron(win, A_REVERSE);
+    mvwprintw(win, rows-2, (cols-8)/2, "   OK   ");
+    wattroff(win, A_REVERSE);
+
+    update_panels();
+    doupdate();
+    wrefresh(win);
+
+    int c;
+    while (1) {
+        c = wgetch(win);
+        if (c == '\r' || c == '\n' || c == KEY_ENTER) break;
+    }
+
+    del_panel(panel);
+    delwin(win);
+    free(fullmsg);
+    ncui_panel_refresh(ncui->panelTop);
 }
 

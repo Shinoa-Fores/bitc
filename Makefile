@@ -1,4 +1,3 @@
-
 OS=$(shell uname -s)
 ARCH=$(shell uname -m)
 
@@ -32,7 +31,7 @@ ifeq ($(OS), OpenBSD)
 CFLAGS += -I/usr/local/include
 endif
 
-CFLAGS += -Ipublic -Ilib/public -Icore/ -Iapps/bitc-cli/ -Iext/src/public
+CFLAGS += -Ipublic -Ilib/public -Icore/ -Iapps/bitc-cli/ -Iext/src/public -Ilib/util
 
 ###
 ### LDOPTS
@@ -58,6 +57,7 @@ endif
 
 LIBS  = -lpthread -lssl -lcrypto -lm -lncurses -ltinfo -lpanel -lform -lcurl
 LIBS += -lleveldb -lsnappy -lstdc++
+LIBS += -lsecp256k1
 
 ifeq ($(OS), OpenBSD)
 LIBS += -L/usr/local/lib -lexecinfo
@@ -108,6 +108,8 @@ BTC_FILES += apps/bitc-cli/main.c
 BTC_FILES += apps/bitc-cli/ncui.c
 BTC_FILES += apps/bitc-cli/bitc_ui.c
 BTC_FILES += apps/bitc-cli/test.c
+
+BTC_FILES += lib/util/ecdsa_secp256k1.c
 
 BTC_FILES := $(sort $(BTC_FILES))
 BTC_OBJ   := $(patsubst %.c,$(BLDDIR)/%.o,$(BTC_FILES))
