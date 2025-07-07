@@ -5,20 +5,13 @@
 #include <openssl/obj_mac.h>
 #include <openssl/err.h>
 #include <openssl/ecdsa.h>
+#include <stdbool.h>
 
 #include "util.h"
 #include "key.h"
 #include "hash.h"
 
 #define LGPFX "KEY:"
-
-
-struct key {
-   EC_KEY       *key;
-   uint8        *pub_key;
-   size_t        pub_len;
-};
-
 
 
 /*
@@ -46,15 +39,16 @@ key_get_privkey(struct key *k,
    if (bn == NULL) {
       return 0;
    }
-   *len = BN_num_bytes(bn) + 1;
-   *priv = safe_malloc(*len);
-   BN_bn2bin(bn, *priv);
-
-   /*
-    * Compressed key.
-    */
-   (*priv)[*len - 1] = 1;
-
+   if (k->compressed) {
+      *len = BN_num_bytes(bn) + 1;
+      *priv = safe_malloc(*len);
+      BN_bn2bin(bn, *priv);
+      (*priv)[*len - 1] = 1;
+   } else {
+      *len = BN_num_bytes(bn);
+      *priv = safe_malloc(*len);
+      BN_bn2bin(bn, *priv);
+   }
    return 1;
 }
 
@@ -254,7 +248,13 @@ key_set_privkey(struct key *k,
    ASSERT(s);
    ASSERT(EC_KEY_check_key(k->key));
 
-   EC_KEY_set_conv_form(k->key, POINT_CONVERSION_COMPRESSED);
+   if (len == 33 && ((const uint8_t*)privkey)[32] == 1) {
+      k->compressed = true;
+      EC_KEY_set_conv_form(k->key, POINT_CONVERSION_COMPRESSED);
+   } else {
+      k->compressed = false;
+      EC_KEY_set_conv_form(k->key, POINT_CONVERSION_UNCOMPRESSED);
+   }
 
    ASSERT(k->pub_key == NULL);
    ASSERT(k->pub_len == 0);
@@ -346,6 +346,7 @@ key_alloc(void)
    k->key = EC_KEY_new_by_curve_name(NID_secp256k1);
    k->pub_key = NULL;
    k->pub_len = 0;
+   k->compressed = true;
 
    return k;
 }

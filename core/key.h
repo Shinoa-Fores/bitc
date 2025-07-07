@@ -1,9 +1,15 @@
 #ifndef __KEY_H__
 #define __KEY_H__
 
+#include <openssl/ec.h>
 #include "hash.h"
 
-struct key;
+struct key {
+   EC_KEY       *key;
+   uint8        *pub_key;
+   size_t        pub_len;
+   bool          compressed; // Track if key is compressed
+};
 
 struct key *key_alloc(void);
 struct key *key_generate_new(void);
