@@ -198,6 +198,7 @@ struct ncui {
    bool                  curs_on;
    int                   fwin_width;
    int                   fwin_height;
+   bool                  command_mode;
 };
 
 
@@ -837,7 +838,7 @@ ncui_panel_scroll(struct ncpanel *panel,
  */
 
 static void
-ncui_tx_form_destroy(struct ncui *ncui)
+ncui_tx_form_destroy(struct ncui *ncui, int num_fields)
 {
    int i;
 
@@ -853,7 +854,7 @@ ncui_tx_form_destroy(struct ncui *ncui)
    ncui->fwin = NULL;
    ncui->fpanel = NULL;
 
-   for (i = 0; i < ARRAYSIZE(ncui->field); i++) {
+   for (i = 0; i < num_fields; i++) {
       free_field(ncui->field[i]);
    }
    ncui_draw_frame();
@@ -925,7 +926,7 @@ ncui_tx_form_complete(struct ncui *ncui,
       bitcui_set_status("TX cancelled.");
    }
 
-   ncui_tx_form_destroy(ncui);
+   ncui_tx_form_destroy(ncui, TX_FIELD_NUM);
    ncui_panel_refresh(ncui->panelTop);
 }
 
@@ -958,9 +959,6 @@ ncui_form_input_cb(struct ncui *ncui)
    bitcui_set_status("key=%u pressed", c);
 
    switch (c) {
-   case '`':
-      isOK = 0;
-      isCancel = 1;
    case '\r':
       if (isOK || isCancel) {
          if (f == ncui->field[SIGN_FIELD_OK] || f == ncui->field[SIGN_FIELD_CANCEL]) {
@@ -1065,13 +1063,57 @@ ncui_normal_input_cb(struct ncui *ncui)
 
    c = getch();
 
+   if (ncui->command_mode) {
+      // Command mode: handle input for vim-like commands
+      switch (c) {
+      case 27: // ESC again: exit command mode
+         ncui->command_mode = false;
+         ncui->kbdInputLen = 0;
+         ncui->kbdInput[0] = '\0';
+         bitcui_set_status("");
+         break;
+      case '\r':
+      case '\n':
+         if (ncui->kbdInputLen > 0) {
+            ncui->kbdInput[ncui->kbdInputLen] = '\0';
+            ncui_input_kbd_cb(ncui, ncui->kbdInput);
+         }
+         ncui->command_mode = false;
+         ncui->kbdInputLen = 0;
+         ncui->kbdInput[0] = '\0';
+         bitcui_set_status("");
+         break;
+      case 127:
+      case KEY_BACKSPACE:
+      case KEY_DC:
+         if (ncui->kbdInputLen > 0) {
+            ncui->kbdInputLen--;
+            ncui->kbdInput[ncui->kbdInputLen] = '\0';
+         }
+         bitcui_set_status("%s", ncui->kbdInput);
+         break;
+      default:
+         if (ncui->kbdInputLen < sizeof(ncui->kbdInput) - 1 && c >= 32 && c < 127) {
+            ncui->kbdInput[ncui->kbdInputLen++] = c;
+            ncui->kbdInput[ncui->kbdInputLen] = '\0';
+         }
+         bitcui_set_status("%s", ncui->kbdInput);
+         break;
+      }
+      return;
+   }
+
    switch (c) {
+   case 27: // ESC: enter command mode
+      ncui->command_mode = true;
+      ncui->kbdInputLen = 0;
+      ncui->kbdInput[0] = '\0';
+      bitcui_set_status(""); // clear status, do not show ':'
+      break;
    case '\r':
       if (ncui->kbdInputLen > 0) {
          ncui->kbdInput[ncui->kbdInputLen] = '\0';
-
          ncui_input_kbd_cb(ncui, ncui->kbdInput);
-
          memset(ncui->kbdInput, 0, sizeof(ncui->kbdInput));
          ncui->kbdInputLen = 0;
       }
@@ -1089,7 +1131,7 @@ ncui_normal_input_cb(struct ncui *ncui)
    case '-':
    case '*':
    case '/':
-   case '(':
+   case '(': 
    case ')':
    case '{':
    case '}':
@@ -1149,7 +1191,6 @@ here:
       panel = ncui_get_panel_by_type(allPanels[c - KEY_F(1)].type);
       ncui_panel_switch_to(panel);
       break;
-   case '`':
    case 'q':
       bitcui_set_status("exit requested.");
       bitc_req_stop();
@@ -1157,31 +1198,6 @@ here:
    case KEY_RESIZE:
       NOT_TESTED_ONCE();
       ncui_redraw();
-      break;
-   case 20: // CTRL-T
-      if (!bitc_state_ready()) {
-         bitcui_set_status("failed to initiate tx: still sync'ing..");
-         break;
-      }
-      if (btc->wallet_state == WALLET_ENCRYPTED_LOCKED) {
-         bitcui_set_status("failed to initiate tx: wallet is encrypted.");
-         break;
-      }
-      ncui_tx_form_create(ncui);
-      break;
-   case 19: // CTRL-S
-      if (!bitc_state_ready()) {
-         bitcui_set_status("failed to sign: still sync'ing..");
-         break;
-      }
-      if (btc->wallet_state == WALLET_ENCRYPTED_LOCKED) {
-         bitcui_set_status("failed to sign: wallet is encrypted.");
-         break;
-      }
-      ncui_sign_form_create(ncui);
-      break;
-   case 22: // CTRL-V or Alt+v (if your terminal sends 22 for Alt+v)
-      ncui_verify_form_create(ncui);
       break;
    default:
       bitcui_set_status("char: %d", c);
@@ -1864,6 +1880,7 @@ ncui_blocklist_update(void)
 static void
 ncui_tx_form_create(struct ncui *ncui)
 {
+   memset(ncui->field, 0, sizeof(ncui->field));
    FIELD **field = ncui->field;
    int rows;
    int cols;
@@ -1987,6 +2004,28 @@ ncui_input_kbd_cb(struct ncui *ncui,
       bitcui_set_status("hash: %s", cmd + 3);
    } else if (strcmp(cmd, "testform") == 0) {
       ncui_tx_form_create(ncui);
+   } else if (strcmp(cmd, ":t") == 0) {
+      if (!bitc_state_ready()) {
+         bitcui_set_status("failed to initiate tx: still sync'ing..");
+         return;
+      }
+      if (btc->wallet_state == WALLET_ENCRYPTED_LOCKED) {
+         bitcui_set_status("failed to initiate tx: wallet is encrypted.");
+         return;
+      }
+      ncui_tx_form_create(ncui);
+   } else if (strcmp(cmd, ":s") == 0) {
+      if (!bitc_state_ready()) {
+         bitcui_set_status("failed to sign: still sync'ing..");
+         return;
+      }
+      if (btc->wallet_state == WALLET_ENCRYPTED_LOCKED) {
+         bitcui_set_status("failed to sign: wallet is encrypted.");
+         return;
+      }
+      ncui_sign_form_create(ncui);
+   } else if (strcmp(cmd, ":v") == 0) {
+      ncui_verify_form_create(ncui);
    }
 }
 
@@ -2728,6 +2767,7 @@ ncui_exit(void)
 static void
 ncui_sign_form_create(struct ncui *ncui)
 {
+   memset(ncui->field, 0, sizeof(ncui->field));
    FIELD **field = ncui->field;
    int rows, cols;
    field[SIGN_FIELD_ADDR_LABEL] = new_field(1, 8, 0, 2, 0, 0);
@@ -2831,7 +2871,7 @@ bitcoin_sign_message(const char *message, struct key *k)
 
     uint8_t sig65[65];
     int recid;
-    int is_compressed = 1; // Assume compressed for Bitcoin addresses
+    int is_compressed = k->compressed ? 1 : 0; // Use actual key compression
     if (!ecdsa_sign_compact_secp256k1(privkey32, (uint8_t*)&hash2, sig65, &recid, is_compressed)) {
         bitcui_set_status("secp256k1 ECDSA signing failed");
         return NULL;
@@ -2878,8 +2918,7 @@ ncui_sign_form_process(struct ncui *ncui)
    for (int i = strlen(msg_buf) - 1; i >= 0 && msg_buf[i] == ' '; --i)
        msg_buf[i] = 0;
 
-   // Now destroy the form
-   ncui_tx_form_destroy(ncui);
+   // Do NOT destroy the form here!
 
    if (!b58_pubkey_is_valid(addr_buf)) {
        bitcui_set_status("address %s is invalid", addr_buf);
@@ -2922,7 +2961,7 @@ ncui_sign_form_complete(struct ncui *ncui, bool ok)
        ncui_sign_form_process(ncui);
    } else {
        bitcui_set_status("Sign cancelled.");
-       ncui_tx_form_destroy(ncui);
+       ncui_tx_form_destroy(ncui, SIGN_FIELD_NUM);
    }
    ncui_panel_refresh(ncui->panelTop);
 }
@@ -2937,6 +2976,7 @@ ncui_sign_form_complete(struct ncui *ncui, bool ok)
 
 static void ncui_verify_form_create(struct ncui *ncui)
 {
+    memset(ncui->field, 0, sizeof(ncui->field));
     FIELD **field = ncui->field;
     int rows, cols;
     field[VERIFY_FIELD_ADDR_LABEL] = new_field(1, 8, 0, 2, 0, 0);
@@ -3140,7 +3180,7 @@ static void ncui_verify_form_complete(struct ncui *ncui, bool ok)
     } else {
         bitcui_set_status("Verify cancelled.");
     }
-    ncui_tx_form_destroy(ncui);
+    ncui_tx_form_destroy(ncui, VERIFY_FIELD_NUM);
     ncui_panel_refresh(ncui->panelTop);
 }
 
